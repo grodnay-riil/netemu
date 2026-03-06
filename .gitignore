@@ -1,0 +1,8 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Ignore profile contents but keep the directory
+profiles/*
+!profiles/.gitkeep
