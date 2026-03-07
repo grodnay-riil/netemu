@@ -8,7 +8,7 @@ per-DSCP QoS and MTU settings. Designed as a simple, self-contained tool for tes
 under realistic network conditions.
 
   Robot ── if_a ──[br0]── if_b ── Operator
-              │                │bw_pct
+              │                │
          B→A shaping      A→B shaping
          HTB + netem      HTB + netem
 
@@ -47,17 +47,31 @@ netemu/
   default class `1:99`.
 - **Use case** — remote control robot: telemetry/control commands (DSCP 46,
   high priority) share the link with video (untagged, best-effort). Default
-  QoS table has two classes: Telemetry (DSCP 46, prio 1) and Default (DSCP 0,
-  prio 2). Per-class min/max BW configurable (default 1 kbps / 1 Gbps = pure
-  priority). Table is editable.
+  QoS table has three classes: Telemetry (DSCP 46, prio 1, queue=10),
+  Default (DSCP 0, prio 2, queue=50), Best Effort (DSCP -1 = catch-all/1:99,
+  prio 7, queue=100). Per-class min/max BW configurable (default 1 kbps /
+  1 Gbps = pure priority). Table is editable. DSCP -1 means no filter rule —
+  maps to HTB default class 1:99.
 - Profiles saved as JSON to `/app/profiles/` (volume-mounted to `./profiles/`
   on host).
+
+## Parameter scope
+
+| Parameter | Scope | Mechanism |
+|---|---|---|
+| Bandwidth cap | Per NIC (shared by all classes) | HTB class `1:1` rate/ceil |
+| Latency, jitter | Per NIC (applied to all classes) | netem on each class leaf |
+| Loss, corrupt, reorder | Per NIC (applied to all classes) | netem on each class leaf |
+| MTU | Per NIC (both interfaces same value) | `ip link set mtu` |
+| Priority | Per class | HTB class `prio` |
+| Min / Max BW | Per class | HTB class `rate` / `ceil` |
+| Queue depth | Per class | netem `limit` |
 
 ## netemu_core.py — data models
 ```python
 @dataclass
 class QoSClass:
-    dscp: int          # DSCP value (0–63)
+    dscp: int          # DSCP value (0–63), or -1 = catch-all (HTB default class 1:99)
     name: str          # display name
     priority: int      # HTB priority (1=highest)
     min_kbps: int      # HTB rate (guaranteed minimum), default 1 kbps
@@ -95,7 +109,7 @@ PRESETS: dict[str, LinkConfig]           # Good Link, Bad Link, Satellite, Mobil
 
 ## app.py — UI structure
 Single page, no tabs, no sidebar, no collapsible sections.
-- **Row 1**: Interface picker (A/B) | Preset selector | Profile save/load
+- **Row 1**: Interface picker (A/B) | MTU input | Preset selector | Profile save/load
 - **Row 2**: Forward (A→B) impairment inputs | Reverse (B→A) impairment inputs (side by side)
 - **Row 3**: QoS DSCP class table (always visible)
 - **Row 4**: Apply / Reset buttons + status bar
@@ -119,6 +133,7 @@ docker compose up --build
 
 ## Current status
 - Core (`netemu_core.py`): bridge-based, always asymmetric, always QoS — implemented
-- UI (`app.py`): single-page redesign (no tabs, no sidebar) — pending implementation
-- PRESETS: need updating to robot-relevant scenarios
+- UI (`app.py`): single-page, no tabs, no sidebar — implemented
+- PRESETS: hardcoded (Good Link, Bad Link, Satellite, Mobile 4G) — not yet tuned for robot use case
+- Streamlit uses poll-based file watcher (`--server.fileWatcherType=poll`) for auto-reload on volume mounts
 - Not yet tested on real hardware

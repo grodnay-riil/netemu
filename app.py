@@ -9,118 +9,146 @@ from netemu_core import (
     LinkConfig, DirectionConfig, QoSClass,
     apply, reset, get_stats,
     list_interfaces, list_profiles, load_profile, save_profile,
-    PRESETS,
 )
 
 st.set_page_config(page_title="NetEmu", page_icon="🌐", layout="wide")
 st.title("🌐 NetEmu — Network Emulator")
 
+# ─── Session state ────────────────────────────────────────────────────────────
+
 def _init_state():
     defaults = {
         "applied": False,
         "log": [],
+        "qos_editor_v": 0,
         "qos_classes": [
             {"dscp": 46, "name": "Telemetry",   "priority": 1, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  10},
-            {"dscp":  0, "name": "Default",     "priority": 2, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  50},
-            {"dscp": -1, "name": "Best Effort", "priority": 7, "min_kbps": 1, "max_kbps": 1000000, "queue_limit": 100},
+            {"dscp":  0, "name": "Default",     "priority": 2, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  10},
+            {"dscp": -1, "name": "Best Effort", "priority": 7, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  10},
         ],
+        # widget-bound keys — set here for first run only
+        "mtu": 1500,
+        "fwd_bw": 0.0, "fwd_lat": 0, "fwd_jit": 0,
+        "fwd_loss": 0.0, "fwd_corrupt": 0.0, "fwd_reorder": 0.0,
+        "rev_bw": 0.0, "rev_lat": 0, "rev_jit": 0,
+        "rev_loss": 0.0, "rev_corrupt": 0.0, "rev_reorder": 0.0,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+def _load_config_to_state(cfg: LinkConfig) -> None:
+    """Stage a config for loading. Applied at the top of the next rerun before any widget renders."""
+    import dataclasses
+    st.session_state["_staged"] = {
+        "mtu":         cfg.mtu,
+        "fwd_bw":      round(cfg.forward.bw_kbps / 1000, 3),
+        "fwd_lat":     cfg.forward.latency_ms,
+        "fwd_jit":     cfg.forward.jitter_ms,
+        "fwd_loss":    float(cfg.forward.loss_pct),
+        "fwd_corrupt": float(cfg.forward.corrupt_pct),
+        "fwd_reorder": float(cfg.forward.reorder_pct),
+        "rev_bw":      round(cfg.reverse.bw_kbps / 1000, 3),
+        "rev_lat":     cfg.reverse.latency_ms,
+        "rev_jit":     cfg.reverse.jitter_ms,
+        "rev_loss":    float(cfg.reverse.loss_pct),
+        "rev_corrupt": float(cfg.reverse.corrupt_pct),
+        "rev_reorder": float(cfg.reverse.reorder_pct),
+        "qos_classes": [dataclasses.asdict(c) for c in cfg.qos_classes],
+        "qos_editor_v": st.session_state.get("qos_editor_v", 0) + 1,
+        "if_a": cfg.if_a,
+        "if_b": cfg.if_b,
+    }
+
 _init_state()
 
-# ─── Row 1: Interface picker | Preset selector | Profile save/load ────────────
+# Auto-load "default" profile on first run of a new session
+if "_startup_done" not in st.session_state:
+    st.session_state["_startup_done"] = True
+    if "default" in list_profiles():
+        _load_config_to_state(load_profile("default"))
+
+# Apply any staged config BEFORE any widget is rendered (Streamlit allows
+# writing to widget-owned keys only before the widget runs in the current script execution)
+if "_staged" in st.session_state:
+    for k, v in st.session_state.pop("_staged").items():
+        st.session_state[k] = v
+
+# ─── Row 1: Interface picker | MTU | Profile save/load ───────────────────────
 
 st.subheader("Configuration")
-r1a, r1b, r1c, r1d, r1e, r1f = st.columns([2, 2, 2, 2, 2, 2])
+r1a, r1b, r1c, r1d = st.columns([2, 2, 2, 3])
 
 ifaces = list_interfaces()
 if len(ifaces) < 2:
     st.error("Need at least 2 network interfaces. Found: " + str(ifaces))
     st.stop()
 
-if_a = r1a.selectbox("Interface A (Robot)", ifaces, index=0)
-if_b = r1b.selectbox("Interface B (Operator)", ifaces, index=min(1, len(ifaces) - 1))
+if st.session_state.get("if_a") not in ifaces:
+    st.session_state["if_a"] = ifaces[0]
+if st.session_state.get("if_b") not in ifaces:
+    st.session_state["if_b"] = ifaces[min(1, len(ifaces) - 1)]
+if_a = r1a.selectbox("Interface A (Robot)", ifaces, key="if_a")
+if_b = r1b.selectbox("Interface B (Operator)", ifaces, key="if_b")
 if if_a == if_b:
     st.warning("Interface A and B must differ.")
 
-mtu = r1c.number_input("MTU (bytes)", min_value=576, max_value=9000, value=1500, step=1)
+mtu = r1c.number_input("MTU (bytes)", min_value=576, max_value=9000, step=1, key="mtu")
 
-preset_names = ["— select —"] + list(PRESETS.keys())
-preset_sel = r1d.selectbox("Preset", preset_names)
-if r1d.button("Load Preset", use_container_width=True) and preset_sel != "— select —":
-    cfg = PRESETS[preset_sel]
-    cfg.if_a = if_a
-    cfg.if_b = if_b
-    st.session_state["_preset"] = cfg
-    st.rerun()
-
-profile_name = r1e.text_input("Profile name", value="my-profile")
 saved = list_profiles()
-load_sel = r1e.selectbox("Saved profiles", ["—"] + saved) if saved else "—"
-save_clicked = r1f.button("💾 Save Profile", use_container_width=True)
-load_clicked = r1f.button("📂 Load Profile", use_container_width=True)
+profile_name = r1d.text_input("Profile name", value="my-profile")
+load_sel = r1d.selectbox("Profiles", ["—"] + saved) if saved else "—"
+_bc1, _bc2, _bc3 = r1d.columns(3)
+save_clicked = _bc1.button("💾 Save", use_container_width=True)
+load_clicked = _bc2.button("📂 Load", use_container_width=True)
+set_default_clicked = _bc3.button("⭐ Save as Default", use_container_width=True)
 
 st.divider()
 
 # ─── Row 2: Forward | Reverse impairment inputs ───────────────────────────────
 
-preset = st.session_state.pop("_preset", None)
-fp = preset.forward if preset else None
-rp = preset.reverse if preset else None
-
-def _dir_inputs(label: str, key: str, p: DirectionConfig | None) -> DirectionConfig:
-    d = p or DirectionConfig()
+def _dir_inputs(label: str, key: str) -> DirectionConfig:
     st.markdown(f"**{label}**")
     c1, c2, c3 = st.columns(3)
-    bw  = c1.number_input("BW (Mbps, 0=∞)", min_value=0.0, max_value=10000.0,
-                           value=round(d.bw_kbps / 1000, 3), step=0.001, format="%.3f", key=f"{key}_bw")
-    lat = c2.number_input("Latency (ms)",   min_value=0, max_value=60000,
-                           value=d.latency_ms, step=1, key=f"{key}_lat")
-    jit = c3.number_input("Jitter (ms)",    min_value=0, max_value=10000,
-                           value=d.jitter_ms, step=1, key=f"{key}_jit")
+    bw      = c1.number_input("BW (Mbps, 0=∞)", min_value=0.0, max_value=10000.0,
+                               step=0.001, format="%.3f", key=f"{key}_bw")
+    lat     = c2.number_input("Latency (ms)",    min_value=0, max_value=60000,
+                               step=1, key=f"{key}_lat")
+    jit     = c3.number_input("Jitter (ms)",     min_value=0, max_value=10000,
+                               step=1, key=f"{key}_jit")
     c4, c5, c6 = st.columns(3)
-    loss    = c4.number_input("Loss (%)",    min_value=0.0, max_value=100.0,
-                               value=float(d.loss_pct), step=0.1, format="%.1f", key=f"{key}_loss")
-    corrupt = c5.number_input("Corrupt (%)", min_value=0.0, max_value=100.0,
-                               value=float(d.corrupt_pct), step=0.01, format="%.2f", key=f"{key}_corrupt")
-    reorder = c6.number_input("Reorder (%)", min_value=0.0, max_value=100.0,
-                               value=float(d.reorder_pct), step=0.1, format="%.1f", key=f"{key}_reorder")
+    loss    = c4.number_input("Loss (%)",        min_value=0.0, max_value=100.0,
+                               step=0.1, format="%.1f", key=f"{key}_loss")
+    corrupt = c5.number_input("Corrupt (%)",     min_value=0.0, max_value=100.0,
+                               step=0.01, format="%.2f", key=f"{key}_corrupt")
+    reorder = c6.number_input("Reorder (%)",     min_value=0.0, max_value=100.0,
+                               step=0.1, format="%.1f", key=f"{key}_reorder")
     return DirectionConfig(bw_kbps=bw * 1000, latency_ms=lat, jitter_ms=jit,
                            loss_pct=loss, corrupt_pct=corrupt, reorder_pct=reorder)
 
 col_fwd, col_rev = st.columns(2)
 with col_fwd:
-    fwd = _dir_inputs("➡️ Forward  (A → B)", "fwd", fp)
+    fwd = _dir_inputs("➡️ Forward  (A → B)", "fwd")
 with col_rev:
-    rev = _dir_inputs("⬅️ Reverse  (B → A)", "rev", rp)
+    rev = _dir_inputs("⬅️ Reverse  (B → A)", "rev")
 
-st.divider()
-
-# ─── Row 3: QoS DSCP class table ─────────────────────────────────────────────
-
-st.subheader("QoS / DSCP Classes")
-df = pd.DataFrame(st.session_state["qos_classes"])
-edited = st.data_editor(
-    df,
-    column_config={
-        "dscp":       st.column_config.NumberColumn("DSCP (-1=any)", min_value=-1, max_value=63),
-        "name":       st.column_config.TextColumn("Name"),
-        "priority":   st.column_config.NumberColumn("Priority (1=high)", min_value=1, max_value=7),
-        "min_kbps":   st.column_config.NumberColumn("Min BW (kbps)", min_value=1),
-        "max_kbps":   st.column_config.NumberColumn("Max BW (kbps)", min_value=1),
-        "queue_limit": st.column_config.NumberColumn("Queue (pkts)", min_value=1),
-    },
-    num_rows="dynamic",
-    use_container_width=True,
-    key="qos_editor",
-)
-st.session_state["qos_classes"] = edited.to_dict("records")
-
-
-st.divider()
+with st.expander("QoS / DSCP Classes", expanded=False):
+    df = pd.DataFrame(st.session_state["qos_classes"])
+    edited = st.data_editor(
+        df,
+        column_config={
+            "dscp":       st.column_config.NumberColumn("DSCP (-1=any)", min_value=-1, max_value=63),
+            "name":       st.column_config.TextColumn("Name"),
+            "priority":   st.column_config.NumberColumn("Priority (1=high)", min_value=1, max_value=7),
+            "min_kbps":   st.column_config.NumberColumn("Min BW (kbps)", min_value=1),
+            "max_kbps":   st.column_config.NumberColumn("Max BW (kbps)", min_value=1),
+            "queue_limit": st.column_config.NumberColumn("Queue (pkts)", min_value=1),
+        },
+        num_rows="dynamic",
+        use_container_width=True,
+        key=f"qos_editor_{st.session_state['qos_editor_v']}",
+    )
+    st.session_state["qos_classes"] = edited.to_dict("records")
 
 # ─── Row 4: Apply / Reset + status ───────────────────────────────────────────
 
@@ -130,11 +158,11 @@ cfg = LinkConfig(if_a=if_a, if_b=if_b, mtu=mtu, forward=fwd, reverse=rev, qos_cl
 if save_clicked and profile_name:
     save_profile(profile_name, cfg)
     st.success(f"Saved '{profile_name}'")
+if set_default_clicked:
+    save_profile("default", cfg)
+    st.success("Saved as default — will auto-load on next session start")
 if load_clicked and load_sel != "—":
-    loaded = load_profile(load_sel)
-    loaded.if_a = if_a
-    loaded.if_b = if_b
-    st.session_state["_preset"] = loaded
+    _load_config_to_state(load_profile(load_sel))
     st.rerun()
 
 col_apply, col_reset, col_status = st.columns([1, 1, 4])
@@ -170,45 +198,37 @@ with col_status:
     else:
         st.warning("⬜ No impairments active")
 
-st.divider()
+with st.expander("Interface Statistics", expanded=False):
+    if st.button("🔄 Refresh Stats"):
+        with st.spinner("Reading stats…"):
+            try:
+                st.session_state["last_stats"] = get_stats(if_a, if_b)
+            except Exception as e:
+                st.error(f"Stats error: {e}")
+    if "last_stats" not in st.session_state:
+        st.info("Press **Refresh Stats** to load current counters.")
+    else:
+        for iface, s in st.session_state["last_stats"].items():
+            st.markdown(f"#### `{iface}`")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("TX Bytes",   f"{s['tx_bytes']:,}")
+            c2.metric("RX Bytes",   f"{s['rx_bytes']:,}")
+            c3.metric("TX Packets", f"{s['tx_packets']:,}")
+            c4.metric("RX Packets", f"{s['rx_packets']:,}")
+            c1.metric("TX Errors",  s["tx_errors"])
+            c2.metric("RX Errors",  s["rx_errors"])
+            c3.metric("TX Dropped", s["tx_dropped"])
+            c4.metric("RX Dropped", s["rx_dropped"])
+            if s["qdiscs"]:
+                st.dataframe(pd.DataFrame([
+                    {"Type": q.get("type"), "Handle": q.get("handle"),
+                     "Bytes": q.get("bytes", 0), "Packets": q.get("packets", 0),
+                     "Dropped": q.get("dropped", 0), "Overlimits": q.get("overlimits", 0)}
+                    for q in s["qdiscs"]
+                ]), use_container_width=True)
 
-# ─── Row 5: Stats ─────────────────────────────────────────────────────────────
-
-st.subheader("Interface Statistics")
-if st.button("🔄 Refresh Stats"):
-    with st.spinner("Reading stats…"):
-        try:
-            st.session_state["last_stats"] = get_stats(if_a, if_b)
-        except Exception as e:
-            st.error(f"Stats error: {e}")
-
-if "last_stats" not in st.session_state:
-    st.info("Press **Refresh Stats** to load current counters.")
-else:
-    for iface, s in st.session_state["last_stats"].items():
-        st.markdown(f"#### `{iface}`")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("TX Bytes",   f"{s['tx_bytes']:,}")
-        c2.metric("RX Bytes",   f"{s['rx_bytes']:,}")
-        c3.metric("TX Packets", f"{s['tx_packets']:,}")
-        c4.metric("RX Packets", f"{s['rx_packets']:,}")
-        c1.metric("TX Errors",  s["tx_errors"])
-        c2.metric("RX Errors",  s["rx_errors"])
-        c3.metric("TX Dropped", s["tx_dropped"])
-        c4.metric("RX Dropped", s["rx_dropped"])
-        if s["qdiscs"]:
-            st.dataframe(pd.DataFrame([
-                {"Type": q.get("type"), "Handle": q.get("handle"),
-                 "Bytes": q.get("bytes", 0), "Packets": q.get("packets", 0),
-                 "Dropped": q.get("dropped", 0), "Overlimits": q.get("overlimits", 0)}
-                for q in s["qdiscs"]
-            ]), use_container_width=True)
-        st.divider()
-
-# ─── Row 6: Command log ───────────────────────────────────────────────────────
-
-st.subheader("Command Log")
-if st.session_state["log"]:
-    st.code("\n".join(st.session_state["log"]), language="bash")
-else:
-    st.info("No commands run yet. Press **Apply** or **Reset**.")
+with st.expander("Command Log", expanded=False):
+    if st.session_state["log"]:
+        st.code("\n".join(st.session_state["log"]), language="bash")
+    else:
+        st.info("No commands run yet. Press **Apply** or **Reset**.")

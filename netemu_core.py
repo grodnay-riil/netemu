@@ -268,8 +268,14 @@ _DEFAULT_QOS = [
     QoSClass(dscp=-1, name="Best Effort", priority=7, queue_limit=100),
 ]
 
+_IRIDIUM_QOS = [
+    QoSClass(dscp=46, name="Telemetry",   priority=1, queue_limit=10),
+    QoSClass(dscp=0,  name="Default",     priority=2, queue_limit=10),
+    QoSClass(dscp=-1, name="Best Effort", priority=7, queue_limit=10),
+]
 
-PRESETS: dict[str, LinkConfig] = {
+
+_PRESETS: dict[str, LinkConfig] = {
     "Good Link": LinkConfig(
         forward=DirectionConfig(bw_kbps=10000, latency_ms=5,   jitter_ms=1,  loss_pct=0.0),
         reverse=DirectionConfig(bw_kbps=10000, latency_ms=5,   jitter_ms=1,  loss_pct=0.0),
@@ -280,10 +286,11 @@ PRESETS: dict[str, LinkConfig] = {
         reverse=DirectionConfig(bw_kbps=2000,  latency_ms=80,  jitter_ms=20, loss_pct=1.0),
         qos_classes=_DEFAULT_QOS,
     ),
-    "Satellite": LinkConfig(
-        forward=DirectionConfig(bw_kbps=5000,  latency_ms=600, jitter_ms=50, loss_pct=0.5),
-        reverse=DirectionConfig(bw_kbps=2000,  latency_ms=600, jitter_ms=50, loss_pct=0.5),
-        qos_classes=_DEFAULT_QOS,
+    "Satellite (Iridium Certus 200)": LinkConfig(
+        mtu=576,
+        forward=DirectionConfig(bw_kbps=200,   latency_ms=600, jitter_ms=50, loss_pct=0.5),
+        reverse=DirectionConfig(bw_kbps=200,   latency_ms=600, jitter_ms=50, loss_pct=0.5),
+        qos_classes=_IRIDIUM_QOS,
     ),
     "Mobile (4G)": LinkConfig(
         forward=DirectionConfig(bw_kbps=5000,  latency_ms=40,  jitter_ms=15, loss_pct=0.2),
@@ -291,3 +298,12 @@ PRESETS: dict[str, LinkConfig] = {
         qos_classes=_DEFAULT_QOS,
     ),
 }
+
+def seed_builtin_profiles() -> None:
+    """Write built-in profiles as JSON files if they don't already exist."""
+    for name, cfg in _PRESETS.items():
+        path = PROFILES_DIR / f"{name}.json"
+        if not path.exists():
+            path.write_text(json.dumps(cfg.to_dict(), indent=2))
+
+seed_builtin_profiles()
