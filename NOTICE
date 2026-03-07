@@ -1,0 +1,31 @@
+NetEmu — Network Emulator
+Copyright (c) 2025 Skana Robotics Ltd. All rights reserved.
+
+This product includes the following third-party software:
+
+--------------------------------------------------------------------------------
+Streamlit
+Copyright (c) Streamlit Inc.
+Licensed under the Apache License, Version 2.0
+https://github.com/streamlit/streamlit
+
+--------------------------------------------------------------------------------
+pandas
+Copyright (c) 2008-2011, AQR Capital Management, LLC, Lambda Foundry, Inc.
+and PyData Development Team.
+Licensed under the BSD 3-Clause License
+https://github.com/pandas-dev/pandas
+
+--------------------------------------------------------------------------------
+iproute2
+Copyright (c) Alexey Kuznetsov and the iproute2 authors.
+Licensed under the GNU General Public License, Version 2 (GPL-2.0).
+This software is used as an independent executable invoked via subprocess.
+Source code available at: https://github.com/iproute2/iproute2
+or via the Debian/Ubuntu package: apt-get source iproute2
+
+--------------------------------------------------------------------------------
+Python
+Copyright (c) 2001-present Python Software Foundation.
+Licensed under the Python Software Foundation License Version 2
+https://www.python.org

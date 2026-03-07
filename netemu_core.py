@@ -1,6 +1,9 @@
 """
 netemu_core.py — Linux tc/netem control plane for NetEmu
 Requires: iproute2, privileged container (NET_ADMIN + NET_RAW)
+
+Copyright (c) 2025 Skana Robotics Ltd. All rights reserved.
+Proprietary and confidential. Unauthorized use prohibited.
 """
 
 import subprocess

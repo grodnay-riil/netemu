@@ -1,6 +1,9 @@
 """
 app.py — NetEmu Streamlit Web UI
 Single page, no tabs, no sidebar.
+
+Copyright (c) 2025 Skana Robotics Ltd. All rights reserved.
+Proprietary and confidential. Unauthorized use prohibited.
 """
 
 import streamlit as st
@@ -12,7 +15,7 @@ from netemu_core import (
 )
 
 st.set_page_config(page_title="NetEmu", page_icon="🌐", layout="wide")
-st.title("🌐 NetEmu — Network Emulator")
+st.title("🌐 NetEmu — Network Emulator  |  Skana Robotics Ltd.")
 
 # ─── Session state ────────────────────────────────────────────────────────────
 
