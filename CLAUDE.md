@@ -50,9 +50,9 @@ netemu/
   default class `1:99`.
 - **Use case** — remote control robot: telemetry/control commands (DSCP 46,
   high priority) share the link with video (untagged, best-effort). Default
-  QoS table has three classes: Telemetry (DSCP 46, prio 1, queue=10),
-  Default (DSCP 0, prio 2, queue=10), Best Effort (DSCP -1 = catch-all/1:99,
-  prio 7, queue=10). Per-class min/max BW configurable (default 1 kbps /
+  QoS table has three classes: Telemetry (DSCP 46, prio 1, queue=100),
+  Default (DSCP 0, prio 2, queue=100), Best Effort (DSCP -1 = catch-all/1:99,
+  prio 7, queue=100). Per-class min/max BW configurable (default 1 kbps /
   1 Gbps = pure priority). Table is editable. DSCP -1 means no filter rule —
   maps to HTB default class 1:99.
 - **Profiles** saved as JSON to `/app/profiles/` (volume-mounted to `./profiles/`
@@ -60,7 +60,7 @@ netemu/
   if the file doesn't already exist (preserves user edits). A profile named
   `default` is auto-loaded on session start if present.
 - **Iridium Certus 200 preset**: 200 kbps, 600ms latency, 50ms jitter, 0.5% loss,
-  MTU=576, queue_limit=10 on all classes.
+  MTU=576, uses `_DEFAULT_QOS` (queue limit 100 on all classes).
 
 ## Parameter scope
 
@@ -107,6 +107,7 @@ class LinkConfig:
 ## netemu_core.py — public API
 ```python
 apply(cfg: LinkConfig) -> list[str]      # creates bridge, runs tc commands, returns log
+bridge_only(if_a, if_b, mtu) -> list[str]  # bridge with no qdiscs — passthrough mode
 reset(if_a, if_b) -> list[str]           # removes qdiscs + tears down bridge
 get_stats(if_a, if_b) -> dict            # /sys counters + tc -s qdisc output
 list_interfaces() -> list[str]           # non-loopback, non-bridge interfaces
@@ -120,7 +121,7 @@ Single page, no tabs, no sidebar.
 - **Row 1**: Interface picker (A/B) | MTU | Profile name + selectbox + Save / Load / Save-as-Default buttons
 - **Row 2**: Forward (A→B) impairment inputs | Reverse (B→A) impairment inputs (side by side)
 - **Expander**: QoS / DSCP Classes — data_editor table (collapsed by default)
-- **Row 4**: Apply / Reset buttons + status bar
+- **Row 4**: Apply / Bridge Only / Reset buttons + status bar
 - **Expander**: Interface Statistics — TX/RX counters + qdisc drop table, manual refresh
 - **Expander**: Command Log — tc/ip commands from last Apply/Reset
 
@@ -151,8 +152,9 @@ docker compose up --build
   UI (`list_interfaces()` filters them out).
 
 ## Current status
-- Core (`netemu_core.py`): bridge-based, always asymmetric, always QoS — implemented
+- Core (`netemu_core.py`): bridge-based, always asymmetric, always QoS — implemented and tested
 - UI (`app.py`): single-page, no tabs, no sidebar — implemented
-- PRESETS: hardcoded (Good Link, Bad Link, Satellite, Mobile 4G) — not yet tuned for robot use case
+- PRESETS: Good Link, Bad Link, Satellite (Iridium Certus 200), Mobile (4G) — all use `_DEFAULT_QOS`
 - Streamlit uses poll-based file watcher (`--server.fileWatcherType=poll`) for auto-reload on volume mounts
+- Tested via Docker test topology (veth pairs + network namespaces): ping, TCP iperf3, UDP iperf3, QoS priority (two competing DSCP streams) — all verified working
 - Not yet tested on real hardware

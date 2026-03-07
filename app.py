@@ -25,9 +25,9 @@ def _init_state():
         "log": [],
         "qos_editor_v": 0,
         "qos_classes": [
-            {"dscp": 46, "name": "Telemetry",   "priority": 1, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  10},
-            {"dscp":  0, "name": "Default",     "priority": 2, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  10},
-            {"dscp": -1, "name": "Best Effort", "priority": 7, "min_kbps": 1, "max_kbps": 1000000, "queue_limit":  10},
+            {"dscp": 46, "name": "Telemetry",   "priority": 1, "min_kbps": 1, "max_kbps": 1000000, "queue_limit": 100},
+            {"dscp":  0, "name": "Default",     "priority": 2, "min_kbps": 1, "max_kbps": 1000000, "queue_limit": 100},
+            {"dscp": -1, "name": "Best Effort", "priority": 7, "min_kbps": 1, "max_kbps": 1000000, "queue_limit": 100},
         ],
         # widget-bound keys — set here for first run only
         "mtu": 1500,
@@ -102,9 +102,9 @@ saved = list_profiles()
 profile_name = r1d.text_input("Profile name", value="my-profile")
 load_sel = r1d.selectbox("Profiles", ["—"] + saved) if saved else "—"
 _bc1, _bc2, _bc3 = r1d.columns(3)
-save_clicked = _bc1.button("💾 Save", use_container_width=True)
-load_clicked = _bc2.button("📂 Load", use_container_width=True)
-set_default_clicked = _bc3.button("⭐ Save as Default", use_container_width=True)
+save_clicked = _bc1.button("💾 Save", width="stretch")
+load_clicked = _bc2.button("📂 Load", width="stretch")
+set_default_clicked = _bc3.button("⭐ Save as Default", width="stretch")
 
 st.divider()
 
@@ -148,7 +148,7 @@ with st.expander("QoS / DSCP Classes", expanded=False):
             "queue_limit": st.column_config.NumberColumn("Queue (pkts)", min_value=1),
         },
         num_rows="dynamic",
-        use_container_width=True,
+        width="stretch",
         key=f"qos_editor_{st.session_state['qos_editor_v']}",
     )
     st.session_state["qos_classes"] = edited.to_dict("records")
@@ -170,7 +170,7 @@ if load_clicked and load_sel != "—":
 
 col_apply, col_bridge, col_reset, col_status = st.columns([1, 1, 1, 3])
 with col_apply:
-    if st.button("✅ Apply", type="primary", use_container_width=True):
+    if st.button("✅ Apply", type="primary", width="stretch"):
         if if_a == if_b:
             st.error("Interfaces must differ!")
         else:
@@ -183,7 +183,7 @@ with col_apply:
                     st.error(f"Error: {e}")
 
 with col_bridge:
-    if st.button("🌉 Bridge Only", use_container_width=True):
+    if st.button("🌉 Bridge Only", width="stretch"):
         if if_a == if_b:
             st.error("Interfaces must differ!")
         else:
@@ -196,7 +196,7 @@ with col_bridge:
                     st.error(f"Error: {e}")
 
 with col_reset:
-    if st.button("🔴 Reset", use_container_width=True):
+    if st.button("🔴 Reset", width="stretch"):
         with st.spinner("Resetting…"):
             st.session_state["log"] = reset(if_a, if_b)
             st.session_state["applied"] = False
@@ -241,7 +241,7 @@ with st.expander("Interface Statistics", expanded=False):
                      "Bytes": q.get("bytes", 0), "Packets": q.get("packets", 0),
                      "Dropped": q.get("dropped", 0), "Overlimits": q.get("overlimits", 0)}
                     for q in s["qdiscs"]
-                ]), use_container_width=True)
+                ]), width="stretch")
 
 with st.expander("Command Log", expanded=False):
     if st.session_state["log"]:

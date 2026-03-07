@@ -139,7 +139,7 @@ def _netem_params(d: DirectionConfig) -> str:
 
 def _apply_qos(iface: str, d: DirectionConfig,
                classes: list[QoSClass], log: list[str]) -> None:
-    cmds = [f"tc qdisc del dev {iface} root"]
+    cmds = []
     total_bw = f"{int(d.bw_kbps)}kbit" if d.bw_kbps > 0 else "1gbit"
     cmds.append(f"tc qdisc add dev {iface} root handle 1: htb default 99")
     cmds.append(
@@ -165,10 +165,11 @@ def _apply_qos(iface: str, d: DirectionConfig,
             f"u32 match ip tos {tos_val} 0xfc flowid 1:{handle}"
         )
     be_rate  = f"{be_cls.min_kbps}kbit" if be_cls else "1mbit"
+    be_ceil  = f"{be_cls.max_kbps}kbit" if be_cls else total_bw
     be_prio  = be_cls.priority           if be_cls else 7
     be_limit = be_cls.queue_limit        if be_cls else 1000
     cmds.append(
-        f"tc class add dev {iface} parent 1:1 classid 1:99 htb rate {be_rate} ceil {total_bw} prio {be_prio}"
+        f"tc class add dev {iface} parent 1:1 classid 1:99 htb rate {be_rate} ceil {be_ceil} prio {be_prio}"
     )
     be_netem = _netem_params(d)
     cmds.append(f"tc qdisc add dev {iface} parent 1:99 handle 99: netem {be_netem} limit {be_limit}")
@@ -243,9 +244,6 @@ def _parse_tc_stats(iface: str) -> list[dict]:
                 "bytes": int(m.group(1)), "packets": int(m.group(2)),
                 "dropped": int(m.group(3)), "overlimits": int(m.group(4)),
             })
-        m = re.match(r"(\d+) bytes? requeued (\d+)", line)
-        if m and current:
-            current["requeued"] = int(m.group(2))
     if current:
         qdiscs.append(current)
     return qdiscs
@@ -278,17 +276,10 @@ def list_profiles() -> list[str]:
     return [p.stem for p in sorted(PROFILES_DIR.glob("*.json"))]
 
 _DEFAULT_QOS = [
-    QoSClass(dscp=46, name="Telemetry",   priority=1, queue_limit=10),
-    QoSClass(dscp=0,  name="Default",     priority=2, queue_limit=50),
+    QoSClass(dscp=46, name="Telemetry",   priority=1, queue_limit=100),
+    QoSClass(dscp=0,  name="Default",     priority=2, queue_limit=100),
     QoSClass(dscp=-1, name="Best Effort", priority=7, queue_limit=100),
 ]
-
-_IRIDIUM_QOS = [
-    QoSClass(dscp=46, name="Telemetry",   priority=1, queue_limit=10),
-    QoSClass(dscp=0,  name="Default",     priority=2, queue_limit=10),
-    QoSClass(dscp=-1, name="Best Effort", priority=7, queue_limit=10),
-]
-
 
 _PRESETS: dict[str, LinkConfig] = {
     "Good Link": LinkConfig(
@@ -305,7 +296,7 @@ _PRESETS: dict[str, LinkConfig] = {
         mtu=576,
         forward=DirectionConfig(bw_kbps=200,   latency_ms=600, jitter_ms=50, loss_pct=0.5),
         reverse=DirectionConfig(bw_kbps=200,   latency_ms=600, jitter_ms=50, loss_pct=0.5),
-        qos_classes=_IRIDIUM_QOS,
+        qos_classes=_DEFAULT_QOS,
     ),
     "Mobile (4G)": LinkConfig(
         forward=DirectionConfig(bw_kbps=5000,  latency_ms=40,  jitter_ms=15, loss_pct=0.2),

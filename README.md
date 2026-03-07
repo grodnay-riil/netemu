@@ -80,9 +80,9 @@ Default classes:
 
 | Class       | DSCP     | Priority    | Queue   |
 | ----------- | -------- | ----------- | ------- |
-| Telemetry   | 46 (EF)  | 1 (highest) | 10 pkts |
-| Default     | 0        | 2           | 10 pkts |
-| Best Effort | -1 (any) | 7 (lowest)  | 10 pkts |
+| Telemetry   | 46 (EF)  | 1 (highest) | 100 pkts |
+| Default     | 0        | 2           | 100 pkts |
+| Best Effort | -1 (any) | 7 (lowest)  | 100 pkts |
 
 The QoS table is fully editable in the UI. Rows can be added or removed.
 
@@ -118,6 +118,86 @@ modprobe sch_htb
 ```bash
 sudo ip link add dummy0 type dummy && sudo ip link set dummy0 up
 sudo ip link add dummy1 type dummy && sudo ip link set dummy1 up
+```
+
+---
+
+## Testing with the built-in topology
+
+The `test` Compose profile creates two veth pairs and named network namespaces
+(`ns-robot`, `ns-op`) on the host. Point NetEmu at `veth-robot` (Interface A)
+and `veth-op` (Interface B), then apply a profile. The namespace endpoints have
+IPs `10.99.0.1` (robot) and `10.99.0.2` (operator).
+
+```bash
+# Start topology
+docker compose --profile test up -d test-topology
+
+# Ping
+docker exec -it netemu-test-topology-1 ip netns exec ns-robot ping 10.99.0.2
+
+# TCP iperf3
+docker exec -it netemu-test-topology-1 ip netns exec ns-op   iperf3 -s -D
+docker exec -it netemu-test-topology-1 ip netns exec ns-robot iperf3 -c 10.99.0.2 -t 30
+
+# UDP iperf3
+# -l (datagram size) must fit within the MTU NetEmu applies to the bridge.
+# Use -l 500 with the Satellite profile (MTU 576); use -l 1400 for MTU 1500 profiles.
+docker exec -it netemu-test-topology-1 ip netns exec ns-op   iperf3 -s -D
+docker exec -it netemu-test-topology-1 ip netns exec ns-robot iperf3 -c 10.99.0.2 -u -b 150k -l 500 -t 30
+
+# Stop topology
+docker compose --profile test down
+```
+
+### QoS priority test (Iridium Certus 200 preset)
+
+Saturate the link with Default traffic while injecting Telemetry (DSCP 46) on a
+separate iperf3 server. The Telemetry stream should pass through cleanly while
+the Default stream absorbs the loss.
+
+In the UI: select the **Satellite (Iridium Certus 200)** preset, set Interface A
+to `veth-robot` and Interface B to `veth-op`, then **Apply**.
+
+```bash
+# Two servers on separate ports
+docker exec -it netemu-test-topology-1 ip netns exec ns-op iperf3 -s          # port 5201 — Default
+docker exec -it netemu-test-topology-1 ip netns exec ns-op iperf3 -s -p 5202  # port 5202 — Telemetry
+
+# Default traffic (DSCP 0) — saturates the 200 kbps link
+docker exec -it netemu-test-topology-1 ip netns exec ns-robot \
+  iperf3 -c 10.99.0.2 -u -b 200k -l 400 -p 5201 -t 30
+
+# Telemetry traffic (DSCP 46 = TOS 0xB8) — should survive congestion
+docker exec -it netemu-test-topology-1 ip netns exec ns-robot \
+  iperf3 -c 10.99.0.2 -u -b 50k -l 400 -S 0xB8 -p 5202 -t 30
+```
+
+`-l 400` keeps datagrams under the 576-byte MTU. `-S 0xB8` sets TOS byte 184
+(DSCP 46 << 2), matching the Telemetry `tc filter` rule.
+
+### Using a different image with the same topology
+
+The namespaces (`ns-robot`, `ns-op`) and veth pairs live on the host kernel, not
+inside the test-topology container. Any privileged host-networked container can
+use them as long as `test-topology` is still running.
+
+```bash
+# One-off container with any image
+docker run --rm --privileged --network host <your-image> \
+  ip netns exec ns-robot <your-command>
+```
+
+Or add a service to `docker-compose.yml`:
+
+```yaml
+test-client:
+  image: <your-image>
+  privileged: true
+  network_mode: host
+  profiles:
+    - test
+  command: ip netns exec ns-robot <your-command>
 ```
 
 ---

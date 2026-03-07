@@ -18,3 +18,69 @@ services:
     volumes:
       - ./app.py:/app/app.py
       - ./netemu_core.py:/app/netemu_core.py
+
+  # Test topology — creates veth pairs + network namespaces on the host.
+  # NetEmu bridges veth-robot (if_a) and veth-op (if_b) in the UI.
+  #
+  # Start:  docker compose --profile test up -d test-topology
+  # Stop:   docker compose --profile test down
+  #
+  # Ping:
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-robot ping 10.99.0.2
+  #
+  # TCP iperf3:
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-op   iperf3 -s -D
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-robot iperf3 -c 10.99.0.2 -t 30
+  #
+  # UDP iperf3:
+  #   -l (datagram size) must fit within the MTU NetEmu sets on the bridge interfaces.
+  #   Use -l 500 with the Satellite profile (MTU 576); use -l 1400 for MTU 1500 profiles.
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-op   iperf3 -s -D
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-robot iperf3 -c 10.99.0.2 -u -b 150k -l 500 -t 30
+  #
+  # QoS priority test (Iridium preset — two competing streams):
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-op iperf3 -s
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-op iperf3 -s -p 5202
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-robot iperf3 -c 10.99.0.2 -u -b 200k -l 400 -p 5201 -t 30
+  #   docker exec -it netemu-test-topology-1 ip netns exec ns-robot iperf3 -c 10.99.0.2 -u -b 50k -l 400 -S 0xB8 -p 5202 -t 30
+  #
+  # Using a different image (namespaces live on the host — any privileged+host-network container can use them):
+  #   docker run --rm --privileged --network host <your-image> ip netns exec ns-robot <your-command>
+  test-topology:
+    image: nicolaka/netshoot
+    privileged: true
+    network_mode: host
+    restart: "no"
+    profiles:
+      - test
+    command: >
+      bash -c "
+        ip netns del ns-robot  2>/dev/null || true &&
+        ip netns del ns-op     2>/dev/null || true &&
+        ip link del veth-robot 2>/dev/null || true &&
+        ip link del veth-op    2>/dev/null || true &&
+        ip link add veth-robot type veth peer name veth-robot-peer &&
+        ip link add veth-op    type veth peer name veth-op-peer    &&
+        ip netns add ns-robot &&
+        ip netns add ns-op    &&
+        ip link set veth-robot-peer netns ns-robot &&
+        ip link set veth-op-peer    netns ns-op    &&
+        ip netns exec ns-robot ip addr add 10.99.0.1/24 dev veth-robot-peer &&
+        ip netns exec ns-robot ip link set veth-robot-peer up &&
+        ip netns exec ns-op    ip addr add 10.99.0.2/24 dev veth-op-peer &&
+        ip netns exec ns-op    ip link set veth-op-peer    up &&
+        ip link set veth-robot up &&
+        ip link set veth-op    up &&
+        echo 'Topology ready: veth-robot (10.99.0.1) <-> veth-op (10.99.0.2)' &&
+        sleep infinity
+      "
+
+  # Example: run a custom image inside the test topology.
+  # Requires test-topology to be running. Uncomment and replace image/command.
+  # test-client:
+  #   image: <your-image>
+  #   privileged: true
+  #   network_mode: host
+  #   profiles:
+  #     - test
+  #   command: ip netns exec ns-robot <your-command>
