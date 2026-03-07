@@ -7,5 +7,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./profiles:/app/profiles
+      - ./app.py:/app/app.py
+      - ./netemu_core.py:/app/netemu_core.py
     ports:
       - "8501:8501"

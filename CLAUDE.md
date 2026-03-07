@@ -3,7 +3,15 @@
 ## What this project is
 A Docker-containerized Linux network emulator that bridges two host NICs and
 imposes configurable impairments (bandwidth, latency, jitter, packet loss,
-corruption, reorder) using the Linux `tc netem` / `HTB` / `IFB` stack.
+corruption, reorder) using `tc netem` with HTB (Hierarchical Token Bucket) for
+per-DSCP QoS and MTU settings. Designed as a simple, self-contained tool for testing applications
+under realistic network conditions.
+
+  Robot ── if_a ──[br0]── if_b ── Operator
+              │                │bw_pct
+         B→A shaping      A→B shaping
+         HTB + netem      HTB + netem
+
 Controlled via a **Streamlit** web UI on port 8501.
 
 ## Stack
@@ -21,42 +29,78 @@ netemu/
 ├── docker-compose.yml
 ├── requirements.txt    ← streamlit, pandas
 ├── netemu_core.py      ← all tc/ip logic (apply, reset, get_stats, profiles)
-└── app.py              ← Streamlit UI (4 tabs: Impairments, QoS, Stats, Log)
+└── app.py              ← Streamlit UI (single page: impairments, QoS, stats, log)
 └── profiles/           ← saved JSON link profiles (volume-mounted)
 ```
 
 ## Key design decisions
-- **IFB trick** — `tc netem` only works on egress. Ingress traffic on each
-  interface is mirrored to a virtual `ifb0`/`ifb1` device so netem can be
-  applied to both directions.
-- **Asymmetric mode** — forward (A→B) and reverse (B→A) can have independent
-  impairment settings.
-- **QoS mode** — when enabled, uses HTB as root qdisc with per-DSCP child
-  classes, each with their own netem leaf. DSCP matched via `tc filter u32`.
-- **Simple mode** — when QoS disabled, flat `netem` qdisc with optional `rate`
-  clause (simpler, fewer tc commands).
+- **Bridge-based** — `if_a` and `if_b` are added as ports to a Linux bridge
+  (`br0`). The host acts as a transparent L2 bump-in-the-wire.
+- **Egress-only shaping** — because the bridge forwards traffic out the other
+  port, shaping egress of each physical interface is sufficient:
+  - netem on egress of `if_b` = A→B impairments
+  - netem on egress of `if_a` = B→A impairments
+- **Always asymmetric** — forward (A→B) and reverse (B→A) always have
+  independent impairment settings.
+- **Always QoS** — HTB root qdisc with per-DSCP child classes, each with their
+  own netem leaf. DSCP matched via `tc filter u32`. Untagged packets fall to
+  default class `1:99`.
+- **Use case** — remote control robot: telemetry/control commands (DSCP 46,
+  high priority) share the link with video (untagged, best-effort). Default
+  QoS table has two classes: Telemetry (DSCP 46, prio 1) and Default (DSCP 0,
+  prio 2). Per-class min/max BW configurable (default 1 kbps / 1 Gbps = pure
+  priority). Table is editable.
 - Profiles saved as JSON to `/app/profiles/` (volume-mounted to `./profiles/`
   on host).
 
+## netemu_core.py — data models
+```python
+@dataclass
+class QoSClass:
+    dscp: int          # DSCP value (0–63)
+    name: str          # display name
+    priority: int      # HTB priority (1=highest)
+    min_kbps: int      # HTB rate (guaranteed minimum), default 1 kbps
+    max_kbps: int      # HTB ceil (maximum), default 1 Gbps
+    queue_limit: int   # netem queue depth in packets before drop, default 1000
+
+@dataclass
+class DirectionConfig:
+    bw_kbps: float     # 0 = unlimited
+    latency_ms: int
+    jitter_ms: int
+    loss_pct: float
+    corrupt_pct: float
+    reorder_pct: float
+
+@dataclass
+class LinkConfig:
+    if_a: str              # Robot-side NIC
+    if_b: str              # Operator-side NIC
+    mtu: int               # MTU applied to both interfaces (default 1500)
+    forward: DirectionConfig   # A→B (operator receives)
+    reverse: DirectionConfig   # B→A (robot receives)
+    qos_classes: list[QoSClass]
+```
+
 ## netemu_core.py — public API
 ```python
-apply(cfg: LinkConfig) -> list[str]      # runs tc commands, returns log
-reset(if_a, if_b) -> list[str]           # removes all qdiscs + IFB devices
+apply(cfg: LinkConfig) -> list[str]      # creates bridge, runs tc commands, returns log
+reset(if_a, if_b) -> list[str]           # removes qdiscs + tears down bridge
 get_stats(if_a, if_b) -> dict            # /sys counters + tc -s qdisc output
-list_interfaces() -> list[str]           # non-loopback, non-IFB interfaces
+list_interfaces() -> list[str]           # non-loopback, non-bridge interfaces
 save_profile(name, cfg) / load_profile(name) / list_profiles()
-PRESETS: dict[str, LinkConfig]           # 3G, DSL, Satellite, Clean LAN
+PRESETS: dict[str, LinkConfig]           # Good Link, Bad Link, Satellite, Mobile
 ```
 
 ## app.py — UI structure
-- **Sidebar**: interface picker (A/B), presets dropdown, profile save/load
-- **Tab 1 — Impairments**: sliders for BW/latency/jitter/loss/corrupt/reorder,
-  asymmetric toggle, Apply / Reset buttons, status bar
-- **Tab 2 — QoS/DSCP**: editable dataframe of DSCP classes (bw%, priority,
-  extra delay/loss), DSCP reference table
-- **Tab 3 — Stats**: per-interface TX/RX counters + per-qdisc drop table,
-  manual refresh button
-- **Tab 4 — Command Log**: all tc/ip commands from last Apply/Reset
+Single page, no tabs, no sidebar, no collapsible sections.
+- **Row 1**: Interface picker (A/B) | Preset selector | Profile save/load
+- **Row 2**: Forward (A→B) impairment inputs | Reverse (B→A) impairment inputs (side by side)
+- **Row 3**: QoS DSCP class table (always visible)
+- **Row 4**: Apply / Reset buttons + status bar
+- **Row 5**: Per-interface TX/RX stats (always visible, manual refresh button)
+- **Row 6**: Command log (always visible)
 
 ## How to run
 ```bash
@@ -65,15 +109,16 @@ docker compose up --build
 ```
 
 ## Known potential issues / things to debug
-- `_build_config_from_state()` calls `_direction_widgets()` which renders
-  Streamlit widgets — if "widget rendered outside context" errors appear,
-  move `cfg = _build_config_from_state(...)` inside the `tab_impair` block.
 - Requires at least 2 non-loopback interfaces. For smoke testing without real
   NICs use: `ip link add dummy0 type dummy && ip link set dummy0 up`
 - `tc` commands require the `sch_netem` and `sch_htb` kernel modules.
   If netem commands fail with "RTNETLINK: No such file", run:
   `modprobe sch_netem && modprobe sch_htb` on the host.
-- IFB module: `modprobe ifb numifbs=2` may be needed on some hosts.
+- Bridge interfaces (`br0`) should be excluded from the interface picker in the
+  UI (`list_interfaces()` filters them out).
 
 ## Current status
-Code written, not yet tested. First debug session starting now.
+- Core (`netemu_core.py`): bridge-based, always asymmetric, always QoS — implemented
+- UI (`app.py`): single-page redesign (no tabs, no sidebar) — pending implementation
+- PRESETS: need updating to robot-relevant scenarios
+- Not yet tested on real hardware

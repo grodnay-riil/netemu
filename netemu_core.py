@@ -8,10 +8,13 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+
+import os
 
 PROFILES_DIR = Path("/app/profiles")
 PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+BRIDGE = os.environ.get("NETEMU_BRIDGE", "br0")
 
 # ─── Data Models ─────────────────────────────────────────────────────────────
 
@@ -19,14 +22,14 @@ PROFILES_DIR.mkdir(parents=True, exist_ok=True)
 class QoSClass:
     dscp:       int
     name:       str
-    bw_pct:     int
     priority:   int
-    latency_ms: int = 0
-    loss_pct:   float = 0.0
+    min_kbps:   int   = 1        # HTB rate (guaranteed minimum), default 1 kbps
+    max_kbps:   int   = 1000000  # HTB ceil (maximum), default 1 Gbps
+    queue_limit: int  = 1000     # netem queue depth in packets before drop
 
 @dataclass
 class DirectionConfig:
-    bw_kbps:     int   = 0
+    bw_kbps:     float = 0.0
     latency_ms:  int   = 0
     jitter_ms:   int   = 0
     loss_pct:    float = 0.0
@@ -37,11 +40,10 @@ class DirectionConfig:
 class LinkConfig:
     if_a:        str  = "eth0"
     if_b:        str  = "eth1"
-    asymmetric:  bool = False
+    mtu:         int  = 1500
     forward:     DirectionConfig = field(default_factory=DirectionConfig)
     reverse:     DirectionConfig = field(default_factory=DirectionConfig)
-    qos_enabled: bool = False
-    qos_classes: list[QoSClass] = field(default_factory=list)
+    qos_classes: list[QoSClass]  = field(default_factory=list)
 
     def to_dict(self) -> dict:
         import dataclasses
@@ -54,9 +56,8 @@ class LinkConfig:
         qos = [QoSClass(**q) for q in d.get("qos_classes", [])]
         return LinkConfig(
             if_a=d["if_a"], if_b=d["if_b"],
-            asymmetric=d.get("asymmetric", False),
+            mtu=d.get("mtu", 1500),
             forward=fwd, reverse=rev,
-            qos_enabled=d.get("qos_enabled", False),
             qos_classes=qos,
         )
 
@@ -91,10 +92,30 @@ def list_interfaces() -> list[str]:
     base = Path("/sys/class/net")
     for p in sorted(base.iterdir()):
         name = p.name
-        if name == "lo" or name.startswith("ifb"):
+        if name == "lo" or name.startswith("br"):
             continue
         ifaces.append(name)
     return ifaces
+
+# ─── Bridge setup ─────────────────────────────────────────────────────────────
+
+def _setup_bridge(if_a: str, if_b: str, log: list[str]) -> None:
+    cmds = [
+        f"ip link add name {BRIDGE} type bridge",
+        f"ip link set {BRIDGE} up",
+        f"ip link set {if_a} master {BRIDGE}",
+        f"ip link set {if_b} master {BRIDGE}",
+        f"ip link set {if_a} up",
+        f"ip link set {if_b} up",
+    ]
+    _run_many(cmds, log)
+
+def _teardown_bridge(log: list[str]) -> None:
+    cmds = [
+        f"ip link set {BRIDGE} down",
+        f"ip link del {BRIDGE}",
+    ]
+    _run_many(cmds, log)
 
 # ─── tc / netem builders ──────────────────────────────────────────────────────
 
@@ -113,93 +134,62 @@ def _netem_params(d: DirectionConfig) -> str:
         parts.append(f"reorder {d.reorder_pct:.1f}% 25%")
     return " ".join(parts) if parts else "delay 0ms"
 
-def _setup_ifb(ifb: str, src_if: str, log: list[str]) -> None:
-    cmds = [
-        f"ip link add {ifb} type ifb",
-        f"ip link set {ifb} up",
-        f"tc qdisc add dev {src_if} ingress",
-        (f"tc filter add dev {src_if} parent ffff: protocol all u32 "
-         f"match u32 0 0 action mirred egress redirect dev {ifb}"),
-    ]
-    _run_many(cmds, log)
-
-def _apply_simple(iface: str, ifb: str, d: DirectionConfig, log: list[str]) -> None:
-    netem = _netem_params(d)
-    rate_clause = f"rate {d.bw_kbps}kbit" if d.bw_kbps > 0 else ""
-    cmds = [
-        f"tc qdisc del dev {iface} root",
-        f"tc qdisc add dev {iface} root handle 1: netem {netem} {rate_clause}".strip(),
-        f"tc qdisc del dev {ifb} root",
-        f"tc qdisc add dev {ifb} root handle 1: netem {netem} {rate_clause}".strip(),
-    ]
-    _run_many(cmds, log)
-
-def _apply_qos(iface: str, ifb: str, d: DirectionConfig,
+def _apply_qos(iface: str, d: DirectionConfig,
                classes: list[QoSClass], log: list[str]) -> None:
-    def _build(dev: str) -> list[str]:
-        cmds = [f"tc qdisc del dev {dev} root"]
-        total_bw = f"{d.bw_kbps}kbit" if d.bw_kbps > 0 else "1gbit"
-        cmds.append(f"tc qdisc add dev {dev} root handle 1: htb default 99")
-        cmds.append(
-            f"tc class add dev {dev} parent 1: classid 1:1 htb rate {total_bw} ceil {total_bw}"
-        )
-        for i, cls in enumerate(classes, start=10):
-            cls_bw = f"{int(d.bw_kbps * cls.bw_pct / 100)}kbit" if d.bw_kbps > 0 \
-                     else f"{cls.bw_pct}mbit"
-            handle = i
-            cmds.append(
-                f"tc class add dev {dev} parent 1:1 classid 1:{handle} "
-                f"htb rate {cls_bw} ceil {total_bw} prio {cls.priority}"
-            )
-            extra_d = DirectionConfig(
-                latency_ms=d.latency_ms + cls.latency_ms,
-                jitter_ms=d.jitter_ms,
-                loss_pct=max(d.loss_pct, cls.loss_pct),
-                corrupt_pct=d.corrupt_pct,
-            )
-            netem = _netem_params(extra_d)
-            cmds.append(
-                f"tc qdisc add dev {dev} parent 1:{handle} handle {handle}: netem {netem}"
-            )
-            tos_val = cls.dscp << 2
-            cmds.append(
-                f"tc filter add dev {dev} parent 1: protocol ip prio {cls.priority} "
-                f"u32 match ip tos {tos_val} 0xfc flowid 1:{handle}"
-            )
-        cmds.append(
-            f"tc class add dev {dev} parent 1:1 classid 1:99 htb rate 1mbit ceil {total_bw} prio 7"
-        )
-        be_netem = _netem_params(d)
-        cmds.append(f"tc qdisc add dev {dev} parent 1:99 handle 99: netem {be_netem}")
-        return cmds
+    cmds = [f"tc qdisc del dev {iface} root"]
+    total_bw = f"{int(d.bw_kbps)}kbit" if d.bw_kbps > 0 else "1gbit"
+    cmds.append(f"tc qdisc add dev {iface} root handle 1: htb default 99")
+    cmds.append(
+        f"tc class add dev {iface} parent 1: classid 1:1 htb rate {total_bw} ceil {total_bw}"
+    )
+    # Separate DSCP-matched classes from the catch-all (dscp < 0)
+    matched = [cls for cls in classes if cls.dscp >= 0]
+    be_cls  = next((cls for cls in classes if cls.dscp < 0), None)
 
-    _run_many(_build(iface), log)
-    _run_many(_build(ifb), log)
+    for i, cls in enumerate(matched, start=10):
+        handle = i
+        cmds.append(
+            f"tc class add dev {iface} parent 1:1 classid 1:{handle} "
+            f"htb rate {cls.min_kbps}kbit ceil {cls.max_kbps}kbit prio {cls.priority}"
+        )
+        netem = _netem_params(d)
+        cmds.append(
+            f"tc qdisc add dev {iface} parent 1:{handle} handle {handle}: netem {netem} limit {cls.queue_limit}"
+        )
+        tos_val = cls.dscp << 2
+        cmds.append(
+            f"tc filter add dev {iface} parent 1: protocol ip prio {cls.priority} "
+            f"u32 match ip tos {tos_val} 0xfc flowid 1:{handle}"
+        )
+    be_rate  = f"{be_cls.min_kbps}kbit" if be_cls else "1mbit"
+    be_prio  = be_cls.priority           if be_cls else 7
+    be_limit = be_cls.queue_limit        if be_cls else 1000
+    cmds.append(
+        f"tc class add dev {iface} parent 1:1 classid 1:99 htb rate {be_rate} ceil {total_bw} prio {be_prio}"
+    )
+    be_netem = _netem_params(d)
+    cmds.append(f"tc qdisc add dev {iface} parent 1:99 handle 99: netem {be_netem} limit {be_limit}")
+    _run_many(cmds, log)
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def apply(cfg: LinkConfig) -> list[str]:
     log: list[str] = []
-    fwd = cfg.forward
-    rev = cfg.reverse if cfg.asymmetric else cfg.forward
-    ifb_a, ifb_b = "ifb0", "ifb1"
 
-    for iface in [cfg.if_a, cfg.if_b, ifb_a, ifb_b]:
+    # Tear down any previous state
+    for iface in [cfg.if_a, cfg.if_b]:
         _run(f"tc qdisc del dev {iface} root", check=False)
-        _run(f"tc qdisc del dev {iface} ingress", check=False)
-    for ifb in [ifb_a, ifb_b]:
-        _run(f"ip link set {ifb} down", check=False)
-        _run(f"ip link del {ifb}", check=False)
+    _run(f"ip link set {BRIDGE} down", check=False)
+    _run(f"ip link del {BRIDGE}", check=False)
 
-    _setup_ifb(ifb_a, cfg.if_a, log)
-    _setup_ifb(ifb_b, cfg.if_b, log)
+    _setup_bridge(cfg.if_a, cfg.if_b, log)
 
-    if cfg.qos_enabled and cfg.qos_classes:
-        _apply_qos(cfg.if_a, ifb_b, fwd, cfg.qos_classes, log)
-        _apply_qos(cfg.if_b, ifb_a, rev, cfg.qos_classes, log)
-    else:
-        _apply_simple(cfg.if_a, ifb_b, fwd, log)
-        _apply_simple(cfg.if_b, ifb_a, rev, log)
+    for iface in [cfg.if_a, cfg.if_b]:
+        _run_many([f"ip link set dev {iface} mtu {cfg.mtu}"], log)
+
+    # if_b egress = A→B (forward), if_a egress = B→A (reverse)
+    _apply_qos(cfg.if_b, cfg.forward,  cfg.qos_classes, log)
+    _apply_qos(cfg.if_a, cfg.reverse, cfg.qos_classes, log)
 
     return log
 
@@ -208,14 +198,9 @@ def reset(if_a: str, if_b: str) -> list[str]:
     for iface in [if_a, if_b]:
         _run_many([
             f"tc qdisc del dev {iface} root",
-            f"tc qdisc del dev {iface} ingress",
+            f"ip link set dev {iface} mtu 1500",
         ], log)
-    for ifb in ["ifb0", "ifb1"]:
-        _run_many([
-            f"tc qdisc del dev {ifb} root",
-            f"ip link set {ifb} down",
-            f"ip link del {ifb}",
-        ], log)
+    _teardown_bridge(log)
     return log
 
 # ─── Statistics ───────────────────────────────────────────────────────────────
@@ -277,23 +262,32 @@ def load_profile(name: str) -> LinkConfig:
 def list_profiles() -> list[str]:
     return [p.stem for p in sorted(PROFILES_DIR.glob("*.json"))]
 
+_DEFAULT_QOS = [
+    QoSClass(dscp=46, name="Telemetry",   priority=1, queue_limit=10),
+    QoSClass(dscp=0,  name="Default",     priority=2, queue_limit=50),
+    QoSClass(dscp=-1, name="Best Effort", priority=7, queue_limit=100),
+]
+
+
 PRESETS: dict[str, LinkConfig] = {
-    "3G Mobile": LinkConfig(
-        forward=DirectionConfig(bw_kbps=3000, latency_ms=100, jitter_ms=20, loss_pct=0.5),
-        reverse=DirectionConfig(bw_kbps=1000, latency_ms=100, jitter_ms=20, loss_pct=0.5),
-        asymmetric=True,
+    "Good Link": LinkConfig(
+        forward=DirectionConfig(bw_kbps=10000, latency_ms=5,   jitter_ms=1,  loss_pct=0.0),
+        reverse=DirectionConfig(bw_kbps=10000, latency_ms=5,   jitter_ms=1,  loss_pct=0.0),
+        qos_classes=_DEFAULT_QOS,
     ),
-    "DSL": LinkConfig(
-        forward=DirectionConfig(bw_kbps=8000, latency_ms=20, jitter_ms=3, loss_pct=0.1),
-        reverse=DirectionConfig(bw_kbps=1000, latency_ms=20, jitter_ms=3, loss_pct=0.1),
-        asymmetric=True,
+    "Bad Link": LinkConfig(
+        forward=DirectionConfig(bw_kbps=2000,  latency_ms=80,  jitter_ms=20, loss_pct=1.0),
+        reverse=DirectionConfig(bw_kbps=2000,  latency_ms=80,  jitter_ms=20, loss_pct=1.0),
+        qos_classes=_DEFAULT_QOS,
     ),
-    "Lossy Satellite": LinkConfig(
-        forward=DirectionConfig(bw_kbps=5000, latency_ms=600, jitter_ms=50, loss_pct=2.0),
-        reverse=DirectionConfig(bw_kbps=2000, latency_ms=600, jitter_ms=50, loss_pct=2.0),
-        asymmetric=True,
+    "Satellite": LinkConfig(
+        forward=DirectionConfig(bw_kbps=5000,  latency_ms=600, jitter_ms=50, loss_pct=0.5),
+        reverse=DirectionConfig(bw_kbps=2000,  latency_ms=600, jitter_ms=50, loss_pct=0.5),
+        qos_classes=_DEFAULT_QOS,
     ),
-    "Clean LAN": LinkConfig(
-        forward=DirectionConfig(bw_kbps=0, latency_ms=1, jitter_ms=0, loss_pct=0.0),
+    "Mobile (4G)": LinkConfig(
+        forward=DirectionConfig(bw_kbps=5000,  latency_ms=40,  jitter_ms=15, loss_pct=0.2),
+        reverse=DirectionConfig(bw_kbps=1000,  latency_ms=40,  jitter_ms=15, loss_pct=0.2),
+        qos_classes=_DEFAULT_QOS,
     ),
 }
