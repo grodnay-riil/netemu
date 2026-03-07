@@ -1,11 +1,11 @@
 # NetEmu — Project Context for Claude
 
 ## What this project is
-A Docker-containerized Linux network emulator that bridges two host NICs and
-imposes configurable impairments (bandwidth, latency, jitter, packet loss,
-corruption, reorder) using `tc netem` with HTB (Hierarchical Token Bucket) for
-per-DSCP QoS and MTU settings. Designed as a simple, self-contained tool for testing applications
-under realistic network conditions.
+A proprietary Docker-containerized Linux network emulator by **Skana Robotics Ltd.**
+that bridges two host NICs and imposes configurable impairments (bandwidth, latency,
+jitter, packet loss, corruption, reorder) using `tc netem` with HTB (Hierarchical
+Token Bucket) for per-DSCP QoS and MTU settings. Designed for testing robot
+applications under realistic satellite/cellular link conditions.
 
   Robot ── if_a ──[br0]── if_b ── Operator
               │                │
@@ -25,11 +25,14 @@ Controlled via a **Streamlit** web UI on port 8501.
 ```
 netemu/
 ├── CLAUDE.md           ← you are here
+├── LICENSE             ← proprietary, all rights reserved
+├── NOTICE              ← third-party attributions (Streamlit, pandas, iproute2)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt    ← streamlit, pandas
+├── dev-net.sh          ← veth+namespace test topology (up/down/status/test/pressure)
 ├── netemu_core.py      ← all tc/ip logic (apply, reset, get_stats, profiles)
-└── app.py              ← Streamlit UI (single page: impairments, QoS, stats, log)
+├── app.py              ← Streamlit UI (single page, expanders for QoS/stats/log)
 └── profiles/           ← saved JSON link profiles (volume-mounted)
 ```
 
@@ -48,12 +51,16 @@ netemu/
 - **Use case** — remote control robot: telemetry/control commands (DSCP 46,
   high priority) share the link with video (untagged, best-effort). Default
   QoS table has three classes: Telemetry (DSCP 46, prio 1, queue=10),
-  Default (DSCP 0, prio 2, queue=50), Best Effort (DSCP -1 = catch-all/1:99,
-  prio 7, queue=100). Per-class min/max BW configurable (default 1 kbps /
+  Default (DSCP 0, prio 2, queue=10), Best Effort (DSCP -1 = catch-all/1:99,
+  prio 7, queue=10). Per-class min/max BW configurable (default 1 kbps /
   1 Gbps = pure priority). Table is editable. DSCP -1 means no filter rule —
   maps to HTB default class 1:99.
-- Profiles saved as JSON to `/app/profiles/` (volume-mounted to `./profiles/`
-  on host).
+- **Profiles** saved as JSON to `/app/profiles/` (volume-mounted to `./profiles/`
+  on host). Built-in profiles seeded on startup via `seed_builtin_profiles()`
+  if the file doesn't already exist (preserves user edits). A profile named
+  `default` is auto-loaded on session start if present.
+- **Iridium Certus 200 preset**: 200 kbps, 600ms latency, 50ms jitter, 0.5% loss,
+  MTU=576, queue_limit=10 on all classes.
 
 ## Parameter scope
 
@@ -104,17 +111,29 @@ reset(if_a, if_b) -> list[str]           # removes qdiscs + tears down bridge
 get_stats(if_a, if_b) -> dict            # /sys counters + tc -s qdisc output
 list_interfaces() -> list[str]           # non-loopback, non-bridge interfaces
 save_profile(name, cfg) / load_profile(name) / list_profiles()
-PRESETS: dict[str, LinkConfig]           # Good Link, Bad Link, Satellite, Mobile
+seed_builtin_profiles()                  # called at module level on import
+# _PRESETS is private — Good Link, Bad Link, Satellite (Iridium Certus 200), Mobile (4G)
 ```
 
 ## app.py — UI structure
-Single page, no tabs, no sidebar, no collapsible sections.
-- **Row 1**: Interface picker (A/B) | MTU input | Preset selector | Profile save/load
+Single page, no tabs, no sidebar.
+- **Row 1**: Interface picker (A/B) | MTU | Profile name + selectbox + Save / Load / Save-as-Default buttons
 - **Row 2**: Forward (A→B) impairment inputs | Reverse (B→A) impairment inputs (side by side)
-- **Row 3**: QoS DSCP class table (always visible)
+- **Expander**: QoS / DSCP Classes — data_editor table (collapsed by default)
 - **Row 4**: Apply / Reset buttons + status bar
-- **Row 5**: Per-interface TX/RX stats (always visible, manual refresh button)
-- **Row 6**: Command log (always visible)
+- **Expander**: Interface Statistics — TX/RX counters + qdisc drop table, manual refresh
+- **Expander**: Command Log — tc/ip commands from last Apply/Reset
+
+### Profile loading pattern (`_staged` dict)
+Streamlit owns widget keys after first render — external writes are blocked.
+Fix: store values in `_staged`, flush to widget keys at the very top of the
+next rerun (before any widget renders), then `st.rerun()`.
+`data_editor` version key (`qos_editor_v`) is bumped on each profile load to
+force fresh initialization of the QoS table widget.
+
+### Auto-load default profile
+On first run of a new session (`_startup_done` not in session state), if a
+profile named `default` exists, it is loaded via `_load_config_to_state()`.
 
 ## How to run
 ```bash
