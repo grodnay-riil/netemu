@@ -10,7 +10,7 @@ import streamlit as st
 import pandas as pd
 from netemu_core import (
     LinkConfig, DirectionConfig, QoSClass,
-    apply, reset, get_stats,
+    apply, reset, bridge_only, get_stats,
     list_interfaces, list_profiles, load_profile, save_profile,
 )
 
@@ -168,7 +168,7 @@ if load_clicked and load_sel != "—":
     _load_config_to_state(load_profile(load_sel))
     st.rerun()
 
-col_apply, col_reset, col_status = st.columns([1, 1, 4])
+col_apply, col_bridge, col_reset, col_status = st.columns([1, 1, 1, 3])
 with col_apply:
     if st.button("✅ Apply", type="primary", use_container_width=True):
         if if_a == if_b:
@@ -179,6 +179,19 @@ with col_apply:
                     st.session_state["log"] = apply(cfg)
                     st.session_state["applied"] = True
                     st.success("Applied!")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+
+with col_bridge:
+    if st.button("🌉 Bridge Only", use_container_width=True):
+        if if_a == if_b:
+            st.error("Interfaces must differ!")
+        else:
+            with st.spinner("Bridging…"):
+                try:
+                    st.session_state["log"] = bridge_only(if_a, if_b, mtu)
+                    st.session_state["applied"] = False
+                    st.success("Bridge up — no impairments!")
                 except Exception as e:
                     st.error(f"Error: {e}")
 

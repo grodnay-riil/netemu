@@ -196,6 +196,18 @@ def apply(cfg: LinkConfig) -> list[str]:
 
     return log
 
+def bridge_only(if_a: str, if_b: str, mtu: int = 1500) -> list[str]:
+    """Set up the bridge with no impairments — passthrough mode."""
+    log: list[str] = []
+    for iface in [if_a, if_b]:
+        _run(f"tc qdisc del dev {iface} root", check=False)
+    _run(f"ip link set {BRIDGE} down", check=False)
+    _run(f"ip link del {BRIDGE}", check=False)
+    _setup_bridge(if_a, if_b, log)
+    for iface in [if_a, if_b]:
+        _run_many([f"ip link set dev {iface} mtu {mtu}"], log)
+    return log
+
 def reset(if_a: str, if_b: str) -> list[str]:
     log: list[str] = []
     for iface in [if_a, if_b]:
