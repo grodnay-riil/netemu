@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   netemu:
     build: .
@@ -7,7 +6,15 @@ services:
     restart: unless-stopped
     volumes:
       - ./profiles:/app/profiles
+    # ports:
+    #   - "8501:8501" #not needed with host networking, but can be used for direct access if desired
+
+  netemu-dev:
+    extends:
+      service: netemu
+    restart: "no"
+    profiles:
+      - dev
+    volumes:
       - ./app.py:/app/app.py
       - ./netemu_core.py:/app/netemu_core.py
-    ports:
-      - "8501:8501"
