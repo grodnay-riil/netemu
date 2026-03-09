@@ -104,19 +104,32 @@ def list_interfaces() -> list[str]:
 
 def _setup_bridge(if_a: str, if_b: str, log: list[str]) -> None:
     cmds = [
+        # Prevent NetworkManager from hijacking the NICs while bridged.
+        f"nmcli device set {if_a} managed no",
+        f"nmcli device set {if_b} managed no",
         f"ip link add name {BRIDGE} type bridge",
         f"ip link set {BRIDGE} up",
         f"ip link set {if_a} master {BRIDGE}",
         f"ip link set {if_b} master {BRIDGE}",
         f"ip link set {if_a} up",
         f"ip link set {if_b} up",
+        f"ip link set {if_a} promisc on",
+        f"ip link set {if_b} promisc on",
+        # Allow bridged traffic through iptables FORWARD chain (Docker loads
+        # br_netfilter which sends bridged frames through iptables; its default
+        # FORWARD policy is DROP, blocking non-Docker bridges).
+        f"iptables -I FORWARD -i {BRIDGE} -o {BRIDGE} -j ACCEPT",
     ]
     _run_many(cmds, log)
 
-def _teardown_bridge(log: list[str]) -> None:
+def _teardown_bridge(if_a: str, if_b: str, log: list[str]) -> None:
     cmds = [
+        f"iptables -D FORWARD -i {BRIDGE} -o {BRIDGE} -j ACCEPT",
         f"ip link set {BRIDGE} down",
         f"ip link del {BRIDGE}",
+        # Return NICs to NetworkManager control.
+        f"nmcli device set {if_a} managed yes",
+        f"nmcli device set {if_b} managed yes",
     ]
     _run_many(cmds, log)
 
@@ -216,7 +229,7 @@ def reset(if_a: str, if_b: str) -> list[str]:
             f"tc qdisc del dev {iface} root",
             f"ip link set dev {iface} mtu 1500",
         ], log)
-    _teardown_bridge(log)
+    _teardown_bridge(if_a, if_b, log)
     return log
 
 # ─── Statistics ───────────────────────────────────────────────────────────────

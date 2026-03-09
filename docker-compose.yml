@@ -6,6 +6,7 @@ services:
     restart: unless-stopped
     volumes:
       - ./profiles:/app/profiles
+      - /var/run/dbus/system_bus_socket:/var/run/dbus/system_bus_socket
     # ports:
     #   - "8501:8501" #not needed with host networking, but can be used for direct access if desired
 
